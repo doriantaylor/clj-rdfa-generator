@@ -71,6 +71,21 @@
   (inbound-map [rsrc] "Get the predicate-object map of the resource.")
 )
 
+(defprotocol OntModelOps
+;;  OntModel
+  (ontology-node  [model uri] "Retrieve a resource as an ontology")
+  (ontology-class [model uri] "Retrieve a resource as a class")
+)
+
+(defprotocol OntPropertyOps
+;;  OntProperty
+  (inverse          [prop] "Get owl:inverseOf this property")
+  (symmetric?       [prop] "Answer if property is symmetric")
+  (super-properties [prop] "Get super-properties of this property")
+  (sub-properties   [prop] "Get sub-properties of this property")
+  (equivalents      [prop] "Get equivalents of this property")
+)
+
 (extend-type Statement
   ResourceOps
   (model     [stmt] (.getModel stmt))
@@ -104,12 +119,6 @@
         (or (.getProperty model u) (.createProperty model u)))))
 
   (subjects [model] (iterator-seq (.listSubjects model)))
-)
-
-(defprotocol OntModelOps
-;;  OntModel
-  (ontology-node  [model uri] "Retrieve a resource as an ontology")
-  (ontology-class [model uri] "Retrieve a resource as a class")
 )
 
 (extend-type OntModel
@@ -169,22 +178,13 @@
                 (inbound-properties r))))
 )
 
-(defprotocol OntPropertyOps
-;;  OntProperty
-  (inverse          [prop] "Get owl:inverseOf this property")
-  (symmetric?       [prop] "Answer if property is symmetric")
-  (super-properties [prop] "Get super-properties of this property")
-  (sub-properties   [prop] "Get sub-properties of this property")
-  (equivalents      [prop] "Get equivalents of this property")
-)
-
 (extend-type OntProperty
   OntPropertyOps
-  (inverse    [prop] (or (.getInverse prop) (.getInverseOf prop)))
-  (symmetric? [prop] (.isSymmetricProperty prop))
+  (inverse          [prop] (or (.getInverse prop) (.getInverseOf prop)))
+  (symmetric?       [prop] (.isSymmetricProperty prop))
   (super-properties [prop] (iterator-seq (.listSuperProperties prop)))
-  (sub-properties [prop] (iterator-seq (.listSubProperties prop)))
-  (equivalents [prop] (iterator-seq (.listEquivalentProperties prop)))
+  (sub-properties   [prop] (iterator-seq (.listSubProperties prop)))
+  (equivalents      [prop] (iterator-seq (.listEquivalentProperties prop)))
 )
 
 (defprotocol AbstractStructure
@@ -274,14 +274,27 @@
                  "@type" t }]
      }))
 
+(defn- -inx [ontology]
+  (fn [k]
+    (let [x (property ontology k)
+          i (inverse x)
+          v (if (symmetric? x) k (when i (.as i Property)))]
+      ;; if it isn't clear, we're returning a vector which will be consumed by
+      ;; `into`.
+      (when v [k v]))))
+
 (defn- -normalized-maps [ctx uri]
-  ;; (let [u (if (instance? Resource uri) uri (resource (:model ctx) uri))
-  ;;       in (inbound-map u)
-        
-  ;;       ix (map #(property 
-  ;;       out (outbound-map u)]
-    
-)
+  (let [u (if (instance? Resource uri) uri (resource (:model ctx) uri))
+        o (:ontology ctx) ; some coercions/shorthands
+        in (inbound-map u) out (outbound-map u) ; initial materials
+        inx (into {} (map (-inx o) (keys in)))]
+    ;; returns a vector 
+   (list
+    (merge-with
+     set/union out (into {} (map (fn [[x y]] [y (get in x)]) (seq inx))))
+;;(into {} (map (fn [[x y]] [y (get in x)]) (seq inx)))
+     (select-keys in (filter #(not (contains? inx %)) (keys in)))
+     )))
 
 (defrecord JenaContext [^Model model ^OntModel ontology]
   AbstractStructure
