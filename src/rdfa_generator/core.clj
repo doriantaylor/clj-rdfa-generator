@@ -301,11 +301,9 @@
 
      ;; will need some kind of register to prevent cycles
 
-     ;;"@graph" [{ "@id" uri
-     ;;"@type" (if (= (count t) 1) (first t) t) }]
      "@id" (if (instance? Resource uri) (.getURI uri) uri)
-     "@reverse" (-as-faux-jsonld rev)
      } (dissoc (-as-faux-jsonld fwd) "rdf:type")
+           (when (> (count rev) 0) { "@reverse" (-as-faux-jsonld rev) })
            (when (> (count t) 0)
              { "@type" (if (= (count t) 1) (first t) t) } ))))
 
