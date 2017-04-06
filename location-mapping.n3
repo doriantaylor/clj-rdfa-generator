@@ -1,0 +1,8 @@
+@prefix lm: <http://jena.hpl.hp.com/2004/08/location-mapping#> .
+
+[] lm:mapping
+  [ lm:name "http://purl.org/linked-data/cube#" ;
+    lm:altName "file:resources/cube.n3" ],
+  [ lm:name "http://www.w3.org/1999/xhtml/vocab#" ;
+    lm:altName "file:resources/xhtml-vocab.n3" ] .
+  

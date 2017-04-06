@@ -1,11 +1,14 @@
 (ns rdfa-generator.core
   (:require
+   ;;[org.httpkit.client :as http]
    [clojure.set :as set]
    [clojure.data.json :as json])
   (:import
+   [org.apache.jena.riot RDFDataMgr]
    [org.apache.jena.rdf.model
-    Model ModelFactory Statement Resource Property AnonId]
-   [org.apache.jena.ontology OntModel OntModelSpec OntResource OntProperty])
+    RDFNode Model ModelFactory Statement Resource Property AnonId]
+   [org.apache.jena.ontology OntModel OntModelSpec OntResource OntProperty]
+   )
 )
 
 ;; XXX do something better than this
@@ -48,13 +51,15 @@
   (blank    [model] [model identifier] "Retrieve or generate a blank node")
   (property [model uri] "Retrieve or generate a property")
   (subjects [model] "List all subjects")
-)
+  (size     [model] "Retrieve model size, in number of statements")
+  (parse    [model src] [model src syntax] [model src base syntax]
+    "Read RDF content into the model"))
 
 (defprotocol StatementOps
   "Operations over RDF statements."
-  (subject   [stmt] "Retrieve statement subject.")
-  (predicate [stmt] "Retrieve statement predicate.")
-  (object    [stmt] "Retrieve statement object.")
+  (subject   [^Statement stmt] "Retrieve statement subject.")
+  (predicate [^Statement stmt] "Retrieve statement predicate.")
+  (object    [^Statement stmt] "Retrieve statement object.")
 )
 
 (defprotocol ResourceOps
@@ -88,11 +93,11 @@
 
 (extend-type Statement
   ResourceOps
-  (model     [stmt] (.getModel stmt))
+  (model     [^Statement stmt] (.getModel stmt))
   StatementOps
-  (subject   [stmt] (.getSubject stmt))
-  (predicate [stmt] (.getPredicate stmt))
-  (object    [stmt] (.getObject stmt))
+  (subject   [^Statement stmt] (.getSubject stmt))
+  (predicate [^Statement stmt] (.getPredicate stmt))
+  (object    [^Statement stmt] (.getObject stmt))
 )
 
 (extend-type Model
@@ -119,13 +124,19 @@
         (or (.getProperty model u) (.createProperty model u)))))
 
   (subjects [model] (iterator-seq (.listSubjects model)))
+  (size [model] (.size model))
+  ;; XXX do something smarter with type checking here
+  (parse
+    ([model src] (RDFDataMgr/read model src))
+    ([model src syntax] (RDFDataMgr/read model src syntax))
+    ([model src base syntax] (RDFDataMgr/read model src base syntax)))
 )
 
 (extend-type OntModel
   ModelOps
-  (resource [model uri]
+  (resource [^OntModel model uri]
     (or (.getOntResource model uri) (.createOntResource model uri)))
-  (property [model uri]
+  (property [^OntModel model uri]
     (if (and (instance? OntResource uri) (= model (.getModel uri)))
       (if (instance? OntProperty uri) uri (.as uri OntProperty))
       (let [u (if (instance? OntProperty uri) (.getURI uri) (str uri))]
@@ -133,9 +144,9 @@
 ;;  (property [model uri]
 ;;    (or (.getOntProperty model uri) (.createOntProperty model uri)))
   OntModelOps
-  (ontology-node [model uri]
+  (ontology-node [^OntModel model uri]
     (or (.getOntology model uri) (.createOntology model uri)))
-  (ontology-class [model uri]
+  (ontology-class [^OntModel model uri]
     (or (.getOntClass model uri) (.createClass model uri)))
 )
 
@@ -144,6 +155,7 @@
   (model [r] (.getModel r))
   (types
     ([r] (set (map object (properties r RDF_TYPE)))))
+  
   (properties
     ([r] (iterator-seq (.listProperties r)))
     ([r p]
@@ -162,13 +174,11 @@
            prop (cond (instance? Property p) p
                       (instance? Resource p) (.as p Property)
                       (and m p) (property m (str p)) :else nil)]
-       (when m
-         (iterator-seq (.listStatements m nil prop r))))))
+       (when m (iterator-seq (.listStatements m nil prop r))))))
   (abbreviate [r]
     (if (.isAnon r)
       (str "_:" (.getLabelString (.getId r)))
-      (let [m (.getModel r) u (.getURI r) q (.qnameFor m u)]
-        (or q u))))
+      (let [m (.getModel r) u (.getURI r) q (.qnameFor m u)] (or q u))))
   (outbound-map [r]
     (apply merge-with set/union
            (map (fn [x] { (predicate x) (set [(object x)]) }) (properties r))))
@@ -248,13 +258,34 @@
 ;;(defn- -generate-one [context uri ^Resource r]
 ;;)
 
+(defn- -faux-jsonld-node [^RDFNode node]
+  (if (.isLiteral node)
+    (let [val  (.getLexicalForm node)
+          lang (.getLanguage node)
+          dt   (.getDatatypeURI node)]
+      (cond (and (not (nil? lang)) (> (count lang) 0))
+            { "@language" lang "@value" val }
+            (and (not (nil? dt))
+                 (not= dt "http://www.w3.org/2001/XMLSchema#string"))
+            { "@type" (abbreviate (.createResource (.getModel node) dt))
+             "@value" val }
+            :else val))
+    { "@id" (abbreviate node) }))
+
+(defn- -as-faux-jsonld [obj]
+  (into {} (map (fn [[k v]]
+                  [(abbreviate k) (let [x (map -faux-jsonld-node v)]
+                                    (if (> (count x) 1) (vec x) (first x)))])
+                (seq obj))))
+
 (defn- -generate [context uri]
   (let [m (:model context)
-        s (.getResource m uri)
-        t (-types s)
+        s (if (instance? Resource uri) uri (.getResource m uri))
+        t (sort (-types s))
+        [fwd rev] (normalized-maps context uri)
         ;;p (filter ((iterator-seq (.listProperties s))
         r (iterator-seq (.listResourcesWithProperty m nil s))]
-    {
+    (merge {
      ;; generate context
      "@context" (into {} (.getNsPrefixMap m))
      ;; then generate subject node (plus embedded resources like lists)
@@ -270,17 +301,21 @@
 
      ;; will need some kind of register to prevent cycles
 
-     "@graph" [{ "@id" uri
-                 "@type" t }]
-     }))
+     ;;"@graph" [{ "@id" uri
+     ;;"@type" (if (= (count t) 1) (first t) t) }]
+     "@id" (if (instance? Resource uri) (.getURI uri) uri)
+     "@reverse" (-as-faux-jsonld rev)
+     } (dissoc (-as-faux-jsonld fwd) "rdf:type")
+           (when (> (count t) 0)
+             { "@type" (if (= (count t) 1) (first t) t) } ))))
 
 (defn- -inx [ontology]
   (fn [k]
     (let [x (property ontology k)
           i (inverse x)
           v (if (symmetric? x) k (when i (.as i Property)))]
-      ;; if it isn't clear, we're returning a vector which will be consumed by
-      ;; `into`.
+      ;; if it isn't clear, we're returning a vector which will be
+      ;; consumed by `into`.
       (when v [k v]))))
 
 (defn- -normalized-maps [ctx uri]
@@ -288,19 +323,22 @@
         o (:ontology ctx) ; some coercions/shorthands
         in (inbound-map u) out (outbound-map u) ; initial materials
         inx (into {} (map (-inx o) (keys in)))]
-    ;; returns a vector 
+    ;; returns a pair of maps
    (list
+    ;; out
     (merge-with
      set/union out (into {} (map (fn [[x y]] [y (get in x)]) (seq inx))))
-;;(into {} (map (fn [[x y]] [y (get in x)]) (seq inx)))
-     (select-keys in (filter #(not (contains? inx %)) (keys in)))
-     )))
+    ;; in
+    (select-keys in (filter #(not (contains? inx %)) (keys in))))))
 
 (defrecord JenaContext [^Model model ^OntModel ontology]
   AbstractStructure
   (populate-ontology [me]
     (let [ns (iterator-seq (.listNameSpaces model))]
-      (doseq [uri ns] (.read ontology uri))))
+      (doseq [uri ns]
+        (try (RDFDataMgr/read ontology uri)
+        ;;(try (.read ontology uri)
+             (catch Exception e (println uri))))))
 
   (generate   [me uri] (-generate   me uri))
   (inverse-of [me uri] (-inverse-of me uri))
@@ -311,12 +349,8 @@
 
 (defn new-context
  "Create a new serialization context"
- ([]
-  (new-context (. ModelFactory createDefaultModel)))
- ([model]
-  (new-context model
-               (. ModelFactory createOntologyModel
-                  (. OntModelSpec OWL_MEM_MINI_RULE_INF))))
- ([model ontology]
-  (->JenaContext model ontology))
+ ([] (new-context (. ModelFactory createDefaultModel)))
+ ([model] (new-context model (. ModelFactory createOntologyModel
+                                (. OntModelSpec OWL_MEM_MINI_RULE_INF))))
+ ([model ontology] (->JenaContext model ontology))
 )
