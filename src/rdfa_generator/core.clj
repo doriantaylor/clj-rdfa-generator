@@ -72,7 +72,8 @@
   (inbound-properties
     [rsrc] [rsrc prop] "Get the properties pointing to the resource.")
   (abbreviate [rsrc] "Get the foo:bar (or _:) notation for the resource.")
-  (outbound-map [rsrc] "Get the predicate-object map of the resource.")
+  (outbound-map [rsrc] [rsrc as-label]
+    "Get the predicate-object map of the resource.")
   (inbound-map [rsrc] "Get the predicate-object map of the resource.")
 )
 
@@ -179,9 +180,18 @@
     (if (.isAnon r)
       (str "_:" (.getLabelString (.getId r)))
       (let [m (.getModel r) u (.getURI r) q (.qnameFor m u)] (or q u))))
-  (outbound-map [r]
-    (apply merge-with set/union
-           (map (fn [x] { (predicate x) (set [(object x)]) }) (properties r))))
+  (outbound-map
+    ([r] (outbound-map r nil))
+    ([r as-label]
+     (let [props (if (nil? as-label) (properties r)
+                     (filter #(or (.isLiteral (object %))
+                                  (= (.getURI (predicate %)) RDF_TYPE))
+                             (properties r)))]
+       (apply merge-with set/union
+              (map (fn [x] { (predicate x) (set [(object x)]) }) props)))))
+  ;; (outbound-map [r]
+  ;;   (apply merge-with set/union
+  ;;          (map (fn [x] { (predicate x) (set [(object x)]) }) (properties r))))
   (inbound-map [r]
     (apply merge-with set/union
            (map (fn [x] { (predicate x) (set [(subject x)]) })
@@ -270,7 +280,10 @@
             { "@type" (abbreviate (.createResource (.getModel node) dt))
              "@value" val }
             :else val))
-    { "@id" (abbreviate node) }))
+    (let [t (-types node) ct (count t)
+          tl (cond (> ct 1) t (= ct 1) (first t) :else nil)]
+      (merge { "@id" (abbreviate node) } (when tl { "@type" tl })
+           (dissoc (-as-faux-jsonld (outbound-map node true)) "rdf:type")))))
 
 (defn- -as-faux-jsonld [obj]
   (into {} (map (fn [[k v]]
@@ -284,7 +297,8 @@
         t (sort (-types s))
         [fwd rev] (normalized-maps context uri)
         ;;p (filter ((iterator-seq (.listProperties s))
-        r (iterator-seq (.listResourcesWithProperty m nil s))]
+        ;;r (iterator-seq (.listResourcesWithProperty m nil s))
+        ]
     (merge {
      ;; generate context
      "@context" (into {} (.getNsPrefixMap m))
