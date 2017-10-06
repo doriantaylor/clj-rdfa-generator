@@ -13,6 +13,7 @@
 
 ;; XXX do something better than this
 (def RDF_TYPE "http://www.w3.org/1999/02/22-rdf-syntax-ns#type")
+(def XSD "http://www.w3.org/2001/XMLSchema#")
 
 
 ;; we should probably have a persistent evaluation context of some kind
@@ -249,9 +250,7 @@
 
 (defn- -types [^Resource r]
   (let [^Model m (.getModel r)
-        ^Property t (when m
-                      (-create-property
-                       m "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"))]
+        ^Property t (when m (-create-property m RDF_TYPE))]
     (when m
       (vec (sort (map #(-abbrev-maybe (.getObject %))
                       (list-properties r t)))))))
@@ -296,30 +295,41 @@
         s (if (instance? Resource uri) uri (.getResource m uri))
         t (sort (-types s))
         [fwd rev] (normalized-maps context uri)
-        ;;p (filter ((iterator-seq (.listProperties s))
-        ;;r (iterator-seq (.listResourcesWithProperty m nil s))
-        ]
+        -glob (merge-with set/union fwd rev)
+        preds (into {} (map #(vec % (outbound-map % true)) (keys -glob)))
+        nbrs  (into {} (map #(vec % (outbound-map % true))
+                            (filter #(not (.isLiteral %))
+                                    (apply set/union (vals -glob)))))]
     (merge {
-     ;; generate context
-     "@context" (into {} (.getNsPrefixMap m))
-     ;; then generate subject node (plus embedded resources like lists)
+            ;; generate context (right now only namespaces)
+            "@context" (into {} (.getNsPrefixMap m))
 
-     ;; then generate immediate reverse relations
-     ;; (we only do reverse relations for the initial context node)
+            ;; then generate subject node (plus embedded resources
+            ;; like lists)
+            "@id" (abbreviate s)
 
-     ;; then generate ordered list of (asserted) properties and labels
-     ;; then generate ordered list of (asserted) classes and labels
+            ;; then generate ordered list of (asserted) properties and
+            ;; labels
 
-     ;; then generate ordered list of nearest resource nodes that are
-     ;; at the head of a list/seq/bag/alt or other bnode structure
+            ;; then generate ordered list of (asserted) classes and labels
 
-     ;; will need some kind of register to prevent cycles
+            ;; then generate ordered list of nearest resource nodes that are
+            ;; at the head of a list/seq/bag/alt or other bnode
+            ;; structure
 
-     "@id" (if (instance? Resource uri) (.getURI uri) uri)
-     } (dissoc (-as-faux-jsonld fwd) "rdf:type")
-           (when (> (count rev) 0) { "@reverse" (-as-faux-jsonld rev) })
+            ;; will need some kind of register to prevent cycles
+
+            }
+           ;; then generate the @type
            (when (> (count t) 0)
-             { "@type" (if (= (count t) 1) (first t) t) } ))))
+             { "@type" (if (= (count t) 1) (first t) t) } )
+           ;; then generate all forward nodes minus rdf:type
+           (dissoc (-as-faux-jsonld fwd) "rdf:type")
+           ;; then generate immediate reverse relations
+           ;; (we only do reverse relations for the initial context
+           ;; node)
+           (when (> (count rev) 0) { "@reverse" (-as-faux-jsonld rev) }))))
+           
 
 (defn- -inx [ontology]
   (fn [k]
